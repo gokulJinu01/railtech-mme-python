@@ -47,8 +47,8 @@ dev = [
 [project.urls]
 Homepage = "https://railtech.io"
 Documentation = "https://mme.railtech.io"
-Repository = "https://github.com/railtech/railtech-mme-python"
-Issues = "https://github.com/railtech/railtech-mme-python/issues"
+Repository = "https://github.com/gokulJinu01/railtech-mme-python"
+Issues = "https://github.com/gokulJinu01/railtech-mme-python/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/railtech_mme"]
