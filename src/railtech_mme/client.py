@@ -44,12 +44,9 @@ from railtech_mme.exceptions import (
     MMETimeoutError,
 )
 from railtech_mme.models import (
-    FeedbackRequest,
     InjectFilters,
-    InjectRequest,
     Pack,
     PackItem,
-    SaveRequest,
     SaveResult,
 )
 
@@ -168,12 +165,17 @@ class MME:
         ------
         MMEAuthError, MMERateLimitError, MMEServerError
         """
-        del content, tags, section, status, source  # consumed in body below
-        raise NotImplementedError(
-            "TODO Day 1: POST /memory/save — serialize SaveRequest, call _request, "
-            "parse SaveResult. See Go handler at "
-            "mme-tagging-service/internal/memory/handlers.go (SaveBlock)."
-        )
+        body: dict[str, Any] = {"content": content}
+        if tags is not None:
+            body["tags"] = tags
+        if section is not None:
+            body["section"] = section
+        if status is not None:
+            body["status"] = status
+        if source is not None:
+            body["source"] = source
+        response = self._request("POST", "/memory/save", json_body=body)
+        return SaveResult(**response)
 
     def inject(
         self,
@@ -208,12 +210,19 @@ class MME:
         -------
         :class:`Pack` whose ``items`` collectively fit within ``token_budget``.
         """
-        del prompt, token_budget, limit, filters, project_id, debug
-        raise NotImplementedError(
-            "TODO Day 1: POST /memory/inject — build InjectRequest from kwargs "
-            "(include orgId from JWT), call _request, parse Pack. "
-            "See Go handler in mme-tagging-service/internal/memory/inject.go."
-        )
+        scope = self._tenant_scope(project_override=project_id)
+        body: dict[str, Any] = {
+            "prompt": prompt,
+            "tokenBudget": token_budget,
+            "debug": debug,
+            **scope,
+        }
+        if limit is not None:
+            body["limit"] = limit
+        if filters is not None:
+            body["filters"] = filters.model_dump(by_alias=True, exclude_none=True)
+        response = self._request("POST", "/memory/inject", json_body=body)
+        return Pack(**response)
 
     def feedback(
         self,
@@ -243,11 +252,15 @@ class MME:
         project_id:
             Override the client's default project.
         """
-        del pack_id, accepted, item_ids, tags, project_id
-        raise NotImplementedError(
-            "TODO Day 1: POST /memory/feedback — build FeedbackRequest, call _request, "
-            "discard body. See Go handler in internal/memory/events.go (HandlePackEvent)."
-        )
+        scope = self._tenant_scope(project_override=project_id)
+        body: dict[str, Any] = {
+            "packId": pack_id,
+            "accepted": accepted,
+            "itemIds": item_ids or [],
+            "tags": tags or [],
+            **scope,
+        }
+        self._request("POST", "/memory/feedback", json_body=body)
 
     def recent(
         self,
@@ -255,22 +268,52 @@ class MME:
         limit: int = 20,
         section: Optional[str] = None,
     ) -> list[PackItem]:
-        """Return the most recent memory blocks for the authenticated user."""
-        del limit, section
-        raise NotImplementedError("TODO Day 1: GET /memory/recent")
+        """Return the most recent memory blocks for the authenticated user.
+
+        Note: items come back as :class:`PackItem` objects for symmetry with
+        :meth:`inject`. Fields not present on raw memory blocks (like
+        ``score``) will be ``None``.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if section is not None:
+            params["section"] = section
+        response = self._request("GET", "/memory/recent", params=params)
+        raw_items = response.get("results") or []
+        return [PackItem(**item) for item in raw_items]
 
     def delete(self, memory_id: str) -> None:
-        """Delete a single memory block by id."""
-        del memory_id
-        raise NotImplementedError("TODO Day 1: DELETE /memory/:id")
+        """Delete a single memory block by id. Idempotent on the server side."""
+        self._request("DELETE", f"/memory/{memory_id}")
 
     def tags(self) -> list[str]:
-        """Return all tags known for the authenticated org."""
-        raise NotImplementedError("TODO Day 1: GET /tags/all")
+        """Return all tags known for the authenticated user + org, sorted."""
+        response = self._request("GET", "/tags/all")
+        raw_tags = response.get("tags") or []
+        return [str(t) for t in raw_tags]
 
     # ------------------------------------------------------------------
-    # Internal helpers — fill in on Day 1
+    # Internal helpers
     # ------------------------------------------------------------------
+
+    def _tenant_scope(self, *, project_override: Optional[str] = None) -> dict[str, str]:
+        """Return ``{orgId, projectId?}`` for endpoints that need it in the body.
+
+        Forces an auth exchange if ``_org_id`` is not yet populated, so the
+        first ``inject()`` / ``feedback()`` call on a fresh client still works.
+        ``project_override`` wins over the constructor default when truthy.
+        """
+        self._ensure_jwt()
+        if not self._org_id:
+            raise MMEAuthError(
+                "Server did not return org_id during /auth/exchange; "
+                "cannot scope request to a tenant.",
+                status_code=500,
+            )
+        scope: dict[str, str] = {"orgId": self._org_id}
+        project = project_override or self._project_id
+        if project:
+            scope["projectId"] = project
+        return scope
 
     def _request(
         self,
@@ -465,9 +508,6 @@ class MME:
 
         return jwt
 
-    # Silence unused-import warnings during the scaffold phase (save/inject/
-    # feedback bodies still stubbed; remove these once those are filled in).
-    _unused_refs = (FeedbackRequest, InjectFilters, InjectRequest, PackItem, SaveRequest)
 
 
 # ---------------------------------------------------------------------------
