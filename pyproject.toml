@@ -73,10 +73,15 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "ANN", "RUF"]
-ignore = ["ANN101", "ANN102"]  # self/cls type hints not required
+ignore = [
+    "UP045",   # prefer Optional[X] over X | None for Python 3.9 readability
+    "ANN401",  # Any in **kwargs is fine for thin wrapper classes
+    "RUF002",  # allow typographic minus sign in docstrings
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ANN"]
+"src/railtech_mme/langchain.py" = ["ANN401"]
 
 [tool.mypy]
 python_version = "3.9"

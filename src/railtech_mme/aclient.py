@@ -65,7 +65,7 @@ class AsyncMME:
     # Async context manager
     # ------------------------------------------------------------------
 
-    async def __aenter__(self) -> "AsyncMME":
+    async def __aenter__(self) -> AsyncMME:
         return self
 
     async def __aexit__(

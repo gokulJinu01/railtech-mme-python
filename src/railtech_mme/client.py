@@ -28,13 +28,21 @@ structural symmetry; do not let the two clients drift.
 
 from __future__ import annotations
 
+import json
 from types import TracebackType
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 
 from railtech_mme.auth import TokenCache
-from railtech_mme.exceptions import MMEError
+from railtech_mme.exceptions import (
+    MMEAuthError,
+    MMEClientError,
+    MMEError,
+    MMERateLimitError,
+    MMEServerError,
+    MMETimeoutError,
+)
 from railtech_mme.models import (
     FeedbackRequest,
     InjectFilters,
@@ -94,11 +102,16 @@ class MME:
 
         self._tokens = TokenCache(api_key=resolved_key)
 
+        # Populated by the first successful /auth/exchange; required as
+        # ``orgId`` in the body of /memory/inject and /memory/feedback.
+        self._user_id: Optional[str] = None
+        self._org_id: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Context manager protocol — enables ``with MME(...) as mme:``
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "MME":
+    def __enter__(self) -> MME:
         return self
 
     def __exit__(
@@ -266,35 +279,243 @@ class MME:
         *,
         json_body: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
+        _retry_on_401: bool = True,
     ) -> dict[str, Any]:
-        """Send an authenticated HTTP request and return the parsed JSON body.
+        """Send an authenticated request and return the parsed JSON body.
 
-        Implementation outline for Day 1:
-          1. Ensure a fresh JWT — call ``_ensure_jwt()`` below.
-          2. Build headers: ``Authorization: Bearer <jwt>``, ``Content-Type: application/json``.
-          3. If json_body and ``project_id`` is set, inject ``projectId`` for convenience.
-          4. Call ``self._http.request(method, path, json=json_body, params=params, headers=...)``.
-          5. On 401: invalidate token, retry once.
-          6. On 429: parse ``Retry-After`` header, raise :class:`MMERateLimitError`.
-          7. On 4xx/5xx: raise the matching exception type.
-          8. Return ``response.json()``.
+        Handles the full error taxonomy:
+
+        * **401** → invalidate cached JWT, retry once; if still 401, raise
+          :class:`MMEAuthError`.
+        * **403** → :class:`MMEAuthError` (no retry; this is a permission
+          problem, not a stale token).
+        * **429** → :class:`MMERateLimitError` with ``retry_after`` parsed
+          from the ``Retry-After`` header (RFC 6585).
+        * **4xx** (other) → :class:`MMEClientError`.
+        * **5xx** → :class:`MMEServerError`.
+        * Timeout → :class:`MMETimeoutError`.
+        * Any other network failure → :class:`MMEError`.
+
+        A **2xx** response with an empty body (e.g., 204 No Content) returns
+        an empty dict.
         """
-        del method, path, json_body, params
-        raise NotImplementedError("TODO Day 1: core HTTP dispatcher")
+        jwt = self._ensure_jwt()
+        headers = {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = self._http.request(
+                method,
+                path,
+                json=json_body,
+                params=params,
+                headers=headers,
+            )
+        except httpx.TimeoutException as e:
+            raise MMETimeoutError(f"{method} {path} timed out after {self._timeout}s") from e
+        except httpx.HTTPError as e:  # network failures, DNS, etc.
+            raise MMEError(f"Network error on {method} {path}: {e}") from e
+
+        # --- Success path ----------------------------------------------------
+        if response.is_success:
+            if response.status_code == 204 or not response.content:
+                return {}
+            try:
+                parsed: Any = response.json()
+            except (ValueError, json.JSONDecodeError) as e:
+                raise MMEServerError(
+                    f"Server returned non-JSON on {response.status_code}: {e}",
+                    status_code=response.status_code,
+                ) from e
+            if not isinstance(parsed, dict):
+                raise MMEServerError(
+                    f"Expected JSON object from {method} {path}, "
+                    f"got {type(parsed).__name__}",
+                    status_code=response.status_code,
+                    response_body={"data": parsed},
+                )
+            return cast("dict[str, Any]", parsed)
+
+        # --- Error path ------------------------------------------------------
+        body = _safe_json(response)
+        message = _extract_error_message(body, response.status_code)
+
+        if response.status_code == 401:
+            self._tokens.invalidate()
+            if _retry_on_401:
+                return self._request(
+                    method,
+                    path,
+                    json_body=json_body,
+                    params=params,
+                    _retry_on_401=False,
+                )
+            raise MMEAuthError(message, status_code=401, response_body=body)
+
+        if response.status_code == 403:
+            raise MMEAuthError(message, status_code=403, response_body=body)
+
+        if response.status_code == 429:
+            raise MMERateLimitError(
+                message,
+                retry_after=_parse_retry_after(response),
+                status_code=429,
+                response_body=body,
+            )
+
+        if 400 <= response.status_code < 500:
+            raise MMEClientError(
+                message,
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        if response.status_code >= 500:
+            raise MMEServerError(
+                message,
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        # Should be unreachable — every status code is handled above.
+        raise MMEError(
+            f"Unexpected status {response.status_code}: {message}",
+            status_code=response.status_code,
+            response_body=body,
+        )
 
     def _ensure_jwt(self) -> str:
         """Return a valid JWT, exchanging the API key if needed.
 
-        Implementation outline:
-          1. If ``self._tokens.jwt`` is not None, return it.
-          2. Otherwise POST ``/auth/exchange`` with ``{"api_key": self._api_key}``.
-          3. ``self._tokens.set(response.json()["token"])``.
-          4. Return the new JWT.
+        Side effect: on first successful exchange, also records ``_user_id``
+        and ``_org_id`` on the client so subsequent requests can include
+        ``orgId`` in bodies that require it.
         """
-        raise NotImplementedError("TODO Day 1: exchange mme_live_* for JWT")
+        cached = self._tokens.jwt
+        if cached is not None:
+            return cached
 
-    # Silence unused-import warnings during the scaffold phase.
-    _unused_refs = (FeedbackRequest, InjectRequest, SaveRequest, MMEError)
+        # Exchange the API key — note: this call is unauthenticated, so we
+        # do NOT go through ``_request`` (which would recurse).
+        try:
+            response = self._http.post(
+                "/auth/exchange",
+                json={"apiKey": self._api_key},
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TimeoutException as e:
+            raise MMETimeoutError(
+                f"/auth/exchange timed out after {self._timeout}s"
+            ) from e
+        except httpx.HTTPError as e:
+            raise MMEError(f"Network error on /auth/exchange: {e}") from e
+
+        if response.status_code == 401:
+            body = _safe_json(response)
+            raise MMEAuthError(
+                _extract_error_message(body, 401)
+                or "Invalid or inactive API key. "
+                "Get a new one at https://mme.railtech.io.",
+                status_code=401,
+                response_body=body,
+            )
+        if response.status_code == 429:
+            body = _safe_json(response)
+            raise MMERateLimitError(
+                _extract_error_message(body, 429) or "Too many exchange attempts",
+                retry_after=_parse_retry_after(response),
+                status_code=429,
+                response_body=body,
+            )
+        if not response.is_success:
+            body = _safe_json(response)
+            raise MMEServerError(
+                _extract_error_message(body, response.status_code)
+                or f"Auth exchange failed: {response.status_code}",
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        try:
+            data = cast("dict[str, Any]", response.json())
+        except (ValueError, json.JSONDecodeError) as e:
+            raise MMEServerError(
+                f"/auth/exchange returned non-JSON: {e}",
+                status_code=response.status_code,
+            ) from e
+
+        jwt = data.get("token")
+        if not isinstance(jwt, str) or not jwt:
+            raise MMEServerError(
+                "/auth/exchange succeeded but returned no 'token' field",
+                status_code=response.status_code,
+                response_body=data,
+            )
+
+        self._tokens.set(jwt)
+        # Capture identifiers for body injection on inject/feedback.
+        user_id = data.get("user_id")
+        org_id = data.get("org_id")
+        if isinstance(user_id, str):
+            self._user_id = user_id
+        if isinstance(org_id, str):
+            self._org_id = org_id
+
+        return jwt
+
+    # Silence unused-import warnings during the scaffold phase (save/inject/
+    # feedback bodies still stubbed; remove these once those are filled in).
+    _unused_refs = (FeedbackRequest, InjectFilters, InjectRequest, PackItem, SaveRequest)
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+
+def _safe_json(response: httpx.Response) -> dict[str, Any]:
+    """Best-effort JSON parse of an error response body.
+
+    Returns an empty dict if the body is not valid JSON or not an object.
+    Never raises — error handling should not itself fail.
+    """
+    try:
+        parsed = response.json()
+    except (ValueError, json.JSONDecodeError):
+        return {}
+    if isinstance(parsed, dict):
+        return cast("dict[str, Any]", parsed)
+    return {"data": parsed}
+
+
+def _extract_error_message(body: dict[str, Any], status_code: int) -> str:
+    """Extract a human-readable message from an MME error body.
+
+    MME errors are shaped ``{"error": "...", "code": "..."}``. Fall back to
+    the status code if no ``error`` field is present.
+    """
+    error = body.get("error")
+    if isinstance(error, str) and error:
+        return error
+    return f"HTTP {status_code}"
+
+
+def _parse_retry_after(response: httpx.Response) -> Optional[int]:
+    """Parse the ``Retry-After`` header (RFC 6585) in seconds.
+
+    MME's Traefik middleware emits the integer-seconds form. The HTTP-date
+    form is allowed by the spec but not produced by our backend, so we
+    accept only the integer form and return ``None`` otherwise.
+    """
+    header = response.headers.get("Retry-After") or response.headers.get("retry-after")
+    if header is None:
+        return None
+    try:
+        return int(header)
+    except ValueError:
+        return None
 
 
 def _resolve_api_key(explicit: Optional[str]) -> str:

@@ -20,7 +20,6 @@ from railtech_mme import (
 )
 from railtech_mme.auth import TokenCache
 
-
 # ----------------------------------------------------------------------------
 # Structural / smoke tests — should pass today, no HTTP required
 # ----------------------------------------------------------------------------
@@ -40,7 +39,7 @@ def test_constructor_requires_api_key() -> None:
 def test_constructor_reads_env(monkeypatch: pytest.MonkeyPatch, api_key: str) -> None:
     monkeypatch.setenv("RAILTECH_API_KEY", api_key)
     client = MME()
-    assert client._api_key == api_key  # noqa: SLF001
+    assert client._api_key == api_key
     client.close()
 
 
