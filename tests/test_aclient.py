@@ -145,14 +145,32 @@ async def test_recent_unwraps_results(
     base_url: str,
     register_auth_exchange: Callable[..., None],
 ) -> None:
+    """Async ``recent`` returns :class:`MemoryBlock` objects matching the wire shape.
+
+    See ``test_client.test_recent_unwraps_results`` for the rationale —
+    keeping the sync and async tests in lockstep so they catch the same
+    drift if the server schema moves.
+    """
     register_auth_exchange()
     httpx_mock.add_response(
         method="GET",
         url=f"{base_url}/memory/recent?limit=3",
         json={
             "results": [
-                {"id": "a", "title": "A", "tags": [], "excerpt": "", "tokenCost": 1},
-                {"id": "b", "title": "B", "tags": [], "excerpt": "", "tokenCost": 2},
+                {
+                    "id": "a",
+                    "content": "alpha memory",
+                    "tags": [
+                        {"label": "alpha", "type": "concept", "confidence": 0.7},
+                    ],
+                    "tagsFlat": ["alpha"],
+                },
+                {
+                    "id": "b",
+                    "content": "beta memory",
+                    "tags": [],
+                    "tagsFlat": [],
+                },
             ]
         },
     )
@@ -161,6 +179,9 @@ async def test_recent_unwraps_results(
         items = await mme.recent(limit=3)
 
     assert [i.id for i in items] == ["a", "b"]
+    assert items[0].content == "alpha memory"
+    assert items[0].tags[0].label == "alpha"
+    assert items[1].content == "beta memory"
 
 
 async def test_delete_sends_delete_method(

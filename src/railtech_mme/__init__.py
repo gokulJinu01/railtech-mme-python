@@ -6,8 +6,11 @@ Quick start
     from railtech_mme import MME
 
     mme = MME(api_key="mme_live_...")
-    mme.save("I prefer dark chocolate over milk.")
-    pack = mme.inject("What do I like to eat?")
+    mme.save("I prefer dark chocolate over milk chocolate.")
+    mme.save("I'm allergic to peanuts.")
+    mme.save("My favorite cuisine is Thai.")
+
+    pack = mme.inject("What are my food preferences and allergies?")
     for item in pack.items:
         print(item.title, item.excerpt)
 
@@ -30,6 +33,7 @@ from railtech_mme.exceptions import (
 from railtech_mme.models import (
     Bounds,
     InjectFilters,
+    MemoryBlock,
     Pack,
     PackItem,
     Rationale,
@@ -38,7 +42,7 @@ from railtech_mme.models import (
     Tag,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     # Clients
@@ -55,6 +59,7 @@ __all__ = [
     "MMERateLimitError",
     "MMEServerError",
     "MMETimeoutError",
+    "MemoryBlock",
     "Pack",
     "PackItem",
     "Rationale",

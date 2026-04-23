@@ -104,11 +104,51 @@ class Pack(_MMEModel):
 
 
 class SaveResult(_MMEModel):
-    """Response from ``POST /memory/save``."""
+    """Response from ``POST /memory/save``.
+
+    Carries the new block's ``id`` plus enough server-side context that
+    callers can verify which tags the tagmaker assigned without a follow-up
+    round-trip — useful for testing and for surfacing tag suggestions in
+    user-facing UIs.
+    """
 
     id: str
     status: Optional[str] = None
     message: Optional[str] = None
+    success: Optional[bool] = None
+    org_id: Optional[str] = Field(default=None, alias="orgId")
+    user_id: Optional[str] = Field(default=None, alias="userId")
+    tags: list[Tag] = Field(default_factory=list)
+    tags_flat: list[str] = Field(default_factory=list, alias="tagsFlat")
+
+
+class MemoryBlock(_MMEModel):
+    """A raw memory block as returned by ``GET /memory/recent``.
+
+    Distinct from :class:`PackItem`: a ``PackItem`` is the projection
+    ``inject`` returns inside a token-budgeted pack (with ``title``,
+    ``excerpt``, and a ``Score``), while a ``MemoryBlock`` is the raw
+    stored memory itself — the full ``content``, the structured ``tags``,
+    and provenance fields like ``created_at`` and ``hash``.
+
+    Use this when you need the original text or full tag metadata, e.g.
+    for an admin UI, an export, or feeding the block back into another
+    tool unchanged.
+    """
+
+    id: str
+    content: str = ""
+    tags: list[Tag] = Field(default_factory=list)
+    tags_flat: list[str] = Field(default_factory=list, alias="tagsFlat")
+    section: Optional[str] = None
+    status: Optional[str] = None
+    source: Optional[str] = None
+    importance: Optional[float] = None
+    org_id: Optional[str] = Field(default=None, alias="orgId")
+    user_id: Optional[str] = Field(default=None, alias="userId")
+    hash: Optional[str] = None
+    created_at: Optional[datetime] = Field(default=None, alias="createdAt")
+    updated_at: Optional[datetime] = Field(default=None, alias="updatedAt")
 
 
 # ---------------------------------------------------------------------------

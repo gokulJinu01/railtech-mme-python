@@ -41,8 +41,8 @@ from railtech_mme.exceptions import (
 )
 from railtech_mme.models import (
     InjectFilters,
+    MemoryBlock,
     Pack,
-    PackItem,
     SaveResult,
 )
 
@@ -266,19 +266,27 @@ class MME:
         *,
         limit: int = 20,
         section: Optional[str] = None,
-    ) -> list[PackItem]:
+    ) -> list[MemoryBlock]:
         """Return the most recent memory blocks for the authenticated user.
 
-        Note: items come back as :class:`PackItem` objects for symmetry with
-        :meth:`inject`. Fields not present on raw memory blocks (like
-        ``score``) will be ``None``.
+        Returns raw :class:`MemoryBlock` objects (with full ``content`` and
+        structured ``tags``) — distinct from :class:`PackItem`, which is
+        what :meth:`inject` returns inside a token-budgeted pack.
+
+        Note
+        ----
+        Prior to 0.1.1 this method declared a return type of
+        ``list[PackItem]``, but that model required a ``title`` field that
+        the server does not emit on raw memory blocks, so any real call
+        raised :class:`pydantic.ValidationError`. The :class:`MemoryBlock`
+        model matches the wire shape exactly.
         """
         params: dict[str, Any] = {"limit": limit}
         if section is not None:
             params["section"] = section
         response = self._request("GET", "/memory/recent", params=params)
         raw_items = response.get("results") or []
-        return [PackItem(**item) for item in raw_items]
+        return [MemoryBlock(**item) for item in raw_items]
 
     def delete(self, memory_id: str) -> None:
         """Delete a single memory block by id. Idempotent on the server side."""

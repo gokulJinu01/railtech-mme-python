@@ -22,8 +22,13 @@ from railtech_mme import MME
 
 mme = MME(api_key="mme_live_...")          # get one at https://mme.railtech.io
 
-mme.save("I prefer dark chocolate over milk.")
-pack = mme.inject("What do I like to eat?")
+# Save a few facts — MME tags them automatically
+mme.save("I prefer dark chocolate over milk chocolate.")
+mme.save("I'm allergic to peanuts.")
+mme.save("My favorite cuisine is Thai.")
+
+# Recall them later — tag-graph activation matches keywords in the prompt
+pack = mme.inject("What are my food preferences and allergies?", token_budget=1024)
 
 for item in pack.items:
     print(f"- {item.title}: {item.excerpt}")
@@ -32,6 +37,8 @@ mme.feedback(pack_id=pack.pack_id, accepted=True)
 ```
 
 That's the whole loop: **save** facts as they happen, **inject** them at prompt time, **feedback** to improve future packs.
+
+> **Tip on prompt phrasing.** MME's retrieval is tag-graph-based, not embedding-based: the prompt's keywords seed propagation across the tag graph. Prompts that share concrete words with your saved facts (`food`, `chocolate`, `allergies`) retrieve reliably even on a brand-new account; abstract paraphrases (`dietary preferences`) only start working after the graph has built up enough edges to bridge the gap. This is by design — it's why MME stays explainable and bounded.
 
 ## Async
 
@@ -74,7 +81,7 @@ The tools are LangChain `BaseTool` subclasses, so they drop into any agent that 
 | `mme.save(content, *, tags=None, section=None, status=None, source=None)` | Persist a memory block. Returns `SaveResult`. |
 | `mme.inject(prompt, *, token_budget=2048, limit=None, filters=None, debug=False)` | Retrieve a token-budgeted `Pack`. |
 | `mme.feedback(*, pack_id, accepted, item_ids=None, tags=None)` | Mark a pack as useful or not — trains the edge graph. |
-| `mme.recent(*, limit=20, section=None)` | List the most recent memories. |
+| `mme.recent(*, limit=20, section=None)` | List the most recent memories as raw `MemoryBlock` objects (full `content` and structured `tags`). |
 | `mme.delete(memory_id)` | Remove a memory. |
 | `mme.tags()` | List all tags known for the org. |
 

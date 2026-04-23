@@ -45,8 +45,8 @@ from railtech_mme.exceptions import (
 )
 from railtech_mme.models import (
     InjectFilters,
+    MemoryBlock,
     Pack,
-    PackItem,
     SaveResult,
 )
 
@@ -180,14 +180,14 @@ class AsyncMME:
         *,
         limit: int = 20,
         section: Optional[str] = None,
-    ) -> list[PackItem]:
+    ) -> list[MemoryBlock]:
         """Return recent memory blocks. See :meth:`MME.recent`."""
         params: dict[str, Any] = {"limit": limit}
         if section is not None:
             params["section"] = section
         response = await self._request("GET", "/memory/recent", params=params)
         raw_items = response.get("results") or []
-        return [PackItem(**item) for item in raw_items]
+        return [MemoryBlock(**item) for item in raw_items]
 
     async def delete(self, memory_id: str) -> None:
         """Delete a memory block. See :meth:`MME.delete`."""

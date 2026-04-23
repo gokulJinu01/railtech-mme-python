@@ -19,13 +19,18 @@ async def main() -> None:
     async with AsyncMME() as mme:
         # 1. Save a few memories — concurrently, since we can.
         await asyncio.gather(
-            mme.save("I prefer dark chocolate over milk."),
-            mme.save("My cat's name is Luna."),
+            mme.save("I prefer dark chocolate over milk chocolate."),
             mme.save("I'm allergic to peanuts."),
+            mme.save("My favorite cuisine is Thai."),
         )
 
-        # 2. Retrieve relevant memories for a new prompt
-        pack = await mme.inject("What do I like to eat?", token_budget=1024)
+        # 2. Retrieve relevant memories for a new prompt.
+        #    The prompt's keywords ("food", "allergies") seed tag-graph
+        #    propagation against the tags MME assigned at save-time.
+        pack = await mme.inject(
+            "What are my food preferences and allergies?",
+            token_budget=1024,
+        )
         print(
             f"Pack {pack.pack_id} — {len(pack.items)} items, "
             f"{pack.total_tokens}/{pack.token_budget} tokens"

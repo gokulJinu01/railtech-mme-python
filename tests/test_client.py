@@ -111,6 +111,16 @@ def test_save_success(
             "success": True,
             "userId": "test-user-id",
             "orgId": "test-org-id",
+            "tags": [
+                {
+                    "label": "dark_chocolate",
+                    "origin": "unknown",
+                    "scope": "shared",
+                    "type": "concept",
+                    "confidence": 0.6,
+                },
+            ],
+            "tagsFlat": ["dark_chocolate", "dark", "chocolate"],
         },
     )
 
@@ -120,6 +130,13 @@ def test_save_success(
     assert isinstance(result, SaveResult)
     assert result.id == "mem-abc123"
     assert result.status == "created"
+    # New in 0.1.1: server-side context surfaced as typed fields
+    assert result.success is True
+    assert result.org_id == "test-org-id"
+    assert result.user_id == "test-user-id"
+    assert len(result.tags) == 1
+    assert result.tags[0].label == "dark_chocolate"
+    assert result.tags_flat == ["dark_chocolate", "dark", "chocolate"]
 
     # Verify request details
     requests = httpx_mock.get_requests()
@@ -225,14 +242,44 @@ def test_feedback_returns_none_and_sends_correct_body(
 def test_recent_unwraps_results(
     httpx_mock: HTTPXMock, api_key: str, test_jwt: str, base_url: str
 ) -> None:
+    """``recent`` returns :class:`MemoryBlock` objects matching the real wire shape.
+
+    Mirrors what ``GET /memory/recent`` actually emits: structured ``tags``
+    (full :class:`Tag` dicts, not flat strings), ``tagsFlat`` for substring
+    search, raw ``content`` (no projected ``title``), and provenance fields
+    like ``createdAt`` / ``hash``. Prior to 0.1.1 the SDK parsed this as
+    :class:`PackItem`, which crashed because ``title`` was missing.
+    """
     _exchange_response(httpx_mock, base_url, test_jwt)
     httpx_mock.add_response(
         method="GET",
         url=f"{base_url}/memory/recent?limit=5",
         json={
             "results": [
-                {"id": "mem-1", "title": "First", "tags": [], "excerpt": "a", "tokenCost": 10},
-                {"id": "mem-2", "title": "Second", "tags": [], "excerpt": "b", "tokenCost": 12},
+                {
+                    "id": "mem-1",
+                    "orgId": "test-org-id",
+                    "userId": "test-user-id",
+                    "content": "Dark chocolate is the user's favorite dessert.",
+                    "tags": [
+                        {
+                            "label": "dark_chocolate",
+                            "origin": "unknown",
+                            "scope": "shared",
+                            "type": "concept",
+                            "confidence": 0.6,
+                        },
+                    ],
+                    "tagsFlat": ["dark_chocolate", "dark", "chocolate"],
+                    "createdAt": "2026-04-23T06:28:00.104Z",
+                    "hash": "eec351280c6b59ec",
+                },
+                {
+                    "id": "mem-2",
+                    "content": "Allergic to peanuts.",
+                    "tags": [],
+                    "tagsFlat": [],
+                },
             ],
             "userId": "test-user-id",
             "count": 2,
@@ -244,7 +291,14 @@ def test_recent_unwraps_results(
 
     assert len(items) == 2
     assert items[0].id == "mem-1"
-    assert items[1].excerpt == "b"
+    assert items[0].content == "Dark chocolate is the user's favorite dessert."
+    assert items[0].tags[0].label == "dark_chocolate"
+    assert items[0].tags[0].confidence == 0.6
+    assert items[0].tags_flat == ["dark_chocolate", "dark", "chocolate"]
+    assert items[0].created_at is not None
+    assert items[0].hash == "eec351280c6b59ec"
+    assert items[1].content == "Allergic to peanuts."
+    assert items[1].tags == []
 
 
 def test_delete_sends_delete_method(
