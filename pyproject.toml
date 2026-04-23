@@ -37,6 +37,7 @@ langchain = ["langchain-core>=0.1"]
 dev = [
     "pytest>=7.4",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=4.1",
     "pytest-httpx>=0.30",
     "ruff>=0.5",
     "mypy>=1.10",
@@ -107,3 +108,17 @@ filterwarnings = [
     "error",
     "ignore::DeprecationWarning:pydantic.*",
 ]
+
+[tool.coverage.run]
+source = ["src/railtech_mme"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+show_missing = true
+skip_covered = false

@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+from typing import Callable
 
+import httpx
 import pytest
 from pytest_httpx import HTTPXMock
 
 from railtech_mme import (
     MME,
     MMEAuthError,
+    MMEClientError,
     MMEError,
     MMERateLimitError,
+    MMEServerError,
+    MMETimeoutError,
     Pack,
     SaveResult,
 )
 from railtech_mme.auth import TokenCache
+from railtech_mme.models import InjectFilters
 
 # ---------------------------------------------------------------------------
 # Structural / smoke tests — no HTTP
@@ -355,3 +362,326 @@ def test_invalid_api_key_exchange_raises_auth_error(
 
     assert exc.value.status_code == 401
     assert "Invalid" in exc.value.message
+
+
+# ---------------------------------------------------------------------------
+# Day 3.3: error coverage — every status family + transport-level failures
+# ---------------------------------------------------------------------------
+
+
+def test_403_raises_auth_error_without_retry(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """403 is a permission problem, not a stale token — must NOT trigger a retry."""
+    register_auth_exchange()
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/save",
+        status_code=403,
+        json={"error": "Forbidden", "code": "FORBIDDEN"},
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEAuthError) as exc:
+        mme.save("nope")
+
+    assert exc.value.status_code == 403
+    # Exactly two requests — exchange + the failed save. No retry.
+    assert len(httpx_mock.get_requests()) == 2
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_exception"),
+    [
+        (400, MMEClientError),
+        (404, MMEClientError),
+        (422, MMEClientError),
+        (500, MMEServerError),
+        (502, MMEServerError),
+        (503, MMEServerError),
+    ],
+)
+def test_status_code_maps_to_exception(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+    status_code: int,
+    expected_exception: type[MMEError],
+) -> None:
+    """4xx (non-401/403/429) → MMEClientError; 5xx → MMEServerError."""
+    register_auth_exchange()
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/save",
+        status_code=status_code,
+        json={"error": f"Boom {status_code}"},
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(expected_exception) as exc:
+        mme.save("payload")
+
+    assert exc.value.status_code == status_code
+    assert exc.value.message == f"Boom {status_code}"
+
+
+def test_timeout_raises_mme_timeout_error(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange()
+    httpx_mock.add_exception(httpx.ReadTimeout("read timed out"), method="POST")
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMETimeoutError):
+        mme.save("slow")
+
+
+def test_network_error_raises_mme_error(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange()
+    httpx_mock.add_exception(httpx.ConnectError("connection refused"), method="POST")
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEError) as exc:
+        mme.save("offline")
+
+    # Concrete type is the base MMEError, not a subclass
+    assert type(exc.value) is MMEError
+
+
+def test_malformed_json_on_2xx_raises_server_error(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """A 200 with non-JSON body indicates server bug — surface as MMEServerError."""
+    register_auth_exchange()
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/save",
+        status_code=200,
+        content=b"not json at all",
+        headers={"Content-Type": "text/plain"},
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEServerError):
+        mme.save("hello")
+
+
+def test_2xx_with_json_array_raises_server_error(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """The SDK expects a JSON object on success — an array is a server contract violation."""
+    register_auth_exchange()
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/save",
+        json=[1, 2, 3],
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEServerError) as exc:
+        mme.save("hello")
+
+    assert "object" in exc.value.message.lower() or "list" in exc.value.message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Day 3.4: /auth/exchange edge cases beyond 401
+# ---------------------------------------------------------------------------
+
+
+def test_exchange_429_raises_rate_limit(
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange(
+        status_code=429,
+        response_json={"error": "Too many exchange attempts"},
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMERateLimitError) as exc:
+        mme.save("blocked at the door")
+
+    assert exc.value.status_code == 429
+
+
+def test_exchange_500_raises_server_error(
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange(
+        status_code=500,
+        response_json={"error": "auth backend down"},
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEServerError) as exc:
+        mme.save("blocked at the door")
+
+    assert exc.value.status_code == 500
+
+
+def test_exchange_2xx_without_token_raises_server_error(
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """A 200 response that omits the ``token`` field is a contract bug."""
+    register_auth_exchange(response_json={"user_id": "u", "org_id": "o"})
+
+    with MME(api_key=api_key, base_url=base_url) as mme, pytest.raises(MMEServerError) as exc:
+        mme.save("hello")
+
+    assert "token" in exc.value.message.lower()
+
+
+def test_jwt_is_cached_across_requests(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """Once exchanged, the JWT should be reused — not re-exchanged on every call."""
+    register_auth_exchange()
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/save",
+        json={"id": "mem-1", "status": "ok"},
+        is_reusable=True,
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme:
+        mme.save("first")
+        mme.save("second")
+        mme.save("third")
+
+    requests = httpx_mock.get_requests()
+    exchange_calls = [r for r in requests if r.url.path == "/auth/exchange"]
+    save_calls = [r for r in requests if r.url.path == "/memory/save"]
+    assert len(exchange_calls) == 1, "JWT should have been cached, not re-exchanged"
+    assert len(save_calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# Day 3.5: filters and project_id scoping
+# ---------------------------------------------------------------------------
+
+
+def _stub_inject_response(httpx_mock: HTTPXMock, base_url: str) -> None:
+    """Minimal /memory/inject success body — items list intentionally empty."""
+    httpx_mock.add_response(
+        method="POST",
+        url=f"{base_url}/memory/inject",
+        json={
+            "packId": "pack-empty",
+            "seedTags": [],
+            "tokenBudget": 2048,
+            "totalTokens": 0,
+            "items": [],
+        },
+    )
+
+
+def test_inject_filters_round_trip_into_body(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """``InjectFilters`` instance is serialized with camelCase aliases & no None fields."""
+    register_auth_exchange()
+    _stub_inject_response(httpx_mock, base_url)
+
+    filters = InjectFilters(
+        section="work",
+        status="completed",
+        since=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+    )
+
+    with MME(api_key=api_key, base_url=base_url) as mme:
+        mme.inject("recap last quarter", filters=filters)
+
+    inject_body = json.loads(httpx_mock.get_requests()[1].content)
+    assert inject_body["filters"] == {
+        "section": "work",
+        "status": "completed",
+        "since": "2026-01-01T00:00:00Z",
+    }
+
+
+def test_inject_filters_only_section_omits_none_fields(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    """exclude_none=True — fields the caller didn't set must not appear in the body."""
+    register_auth_exchange()
+    _stub_inject_response(httpx_mock, base_url)
+
+    with MME(api_key=api_key, base_url=base_url) as mme:
+        mme.inject("hello", filters=InjectFilters(section="personal"))
+
+    inject_body = json.loads(httpx_mock.get_requests()[1].content)
+    assert inject_body["filters"] == {"section": "personal"}
+
+
+def test_constructor_project_id_propagates_to_inject_body(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange()
+    _stub_inject_response(httpx_mock, base_url)
+
+    with MME(api_key=api_key, base_url=base_url, project_id="proj-default") as mme:
+        mme.inject("hello")
+
+    body = json.loads(httpx_mock.get_requests()[1].content)
+    assert body["projectId"] == "proj-default"
+
+
+def test_per_call_project_id_overrides_constructor_default(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange()
+    _stub_inject_response(httpx_mock, base_url)
+
+    with MME(api_key=api_key, base_url=base_url, project_id="proj-default") as mme:
+        mme.inject("hello", project_id="proj-override")
+
+    body = json.loads(httpx_mock.get_requests()[1].content)
+    assert body["projectId"] == "proj-override"
+
+
+def test_no_project_id_omits_field_from_body(
+    httpx_mock: HTTPXMock,
+    api_key: str,
+    base_url: str,
+    register_auth_exchange: Callable[..., None],
+) -> None:
+    register_auth_exchange()
+    _stub_inject_response(httpx_mock, base_url)
+
+    with MME(api_key=api_key, base_url=base_url) as mme:
+        mme.inject("hello")
+
+    body = json.loads(httpx_mock.get_requests()[1].content)
+    assert "projectId" not in body
+    assert body["orgId"] == "test-org-id"  # but orgId is always present

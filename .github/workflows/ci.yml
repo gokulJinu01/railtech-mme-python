@@ -34,8 +34,15 @@ jobs:
       - name: Type-check with mypy
         run: mypy src/railtech_mme
 
-      - name: Run pytest
-        run: pytest -v
+      - name: Run pytest with coverage
+        run: pytest -v --cov --cov-report=xml --cov-report=term --cov-fail-under=80
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
 
   build:
     name: Build distribution

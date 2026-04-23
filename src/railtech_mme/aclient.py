@@ -148,7 +148,10 @@ class AsyncMME:
         if limit is not None:
             body["limit"] = limit
         if filters is not None:
-            body["filters"] = filters.model_dump(by_alias=True, exclude_none=True)
+            # mode="json" coerces datetimes to ISO strings so httpx can serialize them.
+            body["filters"] = filters.model_dump(
+                mode="json", by_alias=True, exclude_none=True
+            )
         response = await self._request("POST", "/memory/inject", json_body=body)
         return Pack(**response)
 
