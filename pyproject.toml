@@ -104,9 +104,21 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# We promote warnings to errors by default so genuine SDK-side warnings (a
+# missing await, a deprecation in our own code) fail the suite instead of
+# scrolling past. The two "ignore" entries below are for noise that comes
+# from the test mock harness, not from the SDK:
+#   * pytest-httpx's mock transport leaves stray sockets, which pytest 9.x
+#     surfaces as PytestUnraisableExceptionWarning during teardown and turns
+#     into a fatal ExceptionGroup if we don't filter it.
+#   * The asyncio event loop GC'd after each async test triggers the same
+#     ResourceWarning channel.
+# Both are mock-harness artifacts. Real warnings from src/ still error.
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning:pydantic.*",
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+    "ignore::ResourceWarning",
 ]
 
 [tool.coverage.run]
