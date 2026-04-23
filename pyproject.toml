@@ -84,7 +84,10 @@ ignore = [
 "src/railtech_mme/langchain.py" = ["ANN401"]
 
 [tool.mypy]
-python_version = "3.9"
+# Note: no python_version pin — mypy uses the runtime interpreter, so each
+# CI matrix slot (3.9 / 3.10 / 3.11 / 3.12) type-checks against its own
+# Python version. Pinning to 3.9 caused mypy to refuse match/case syntax in
+# pytest's own source on the 3.10+ runners.
 strict = true
 warn_return_any = true
 warn_unused_configs = true
