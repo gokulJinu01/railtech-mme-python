@@ -29,6 +29,7 @@ installed, so users who never touch LangChain pay zero import cost.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 try:
@@ -43,6 +44,24 @@ except ImportError:  # pragma: no cover
 
 
 from railtech_mme.client import MME
+from railtech_mme.models import Pack
+
+
+def _format_pack(pack: Pack) -> str:
+    """Render an inject pack as a plain-text block for an LLM prompt.
+
+    One memory per line: ``- {title}: {excerpt}``. Falls back to a friendly
+    "no relevant memories" line when the pack is empty so the agent gets a
+    deterministic signal instead of an empty string.
+    """
+    if not pack.items:
+        return "(no relevant memories found)"
+    lines: list[str] = []
+    for item in pack.items:
+        title = (item.title or "memory").strip()
+        excerpt = (item.excerpt or "").strip()
+        lines.append(f"- {title}: {excerpt}" if excerpt else f"- {title}")
+    return "\n".join(lines)
 
 
 def _require_langchain() -> None:
@@ -70,14 +89,22 @@ class MMESaveTool(BaseTool):  # type: ignore[misc, unused-ignore]
         self.mme = mme
 
     def _run(self, content: str) -> str:
-        """TODO Day 2: call self.mme.save(content) and return result.id."""
-        del content
-        raise NotImplementedError("TODO Day 2: wire to MME.save")
+        """Persist ``content`` and return the new memory id."""
+        if self.mme is None:
+            raise RuntimeError("MMESaveTool requires an MME client (mme=...)")
+        result = self.mme.save(content)
+        return result.id
 
     async def _arun(self, content: str) -> str:
-        """TODO Day 2: use AsyncMME when available."""
-        del content
-        raise NotImplementedError("TODO Day 2: wire to AsyncMME.save")
+        """Async variant — runs the sync client in a worker thread.
+
+        We deliberately reuse the sync :class:`MME` client (rather than
+        requiring users to construct an :class:`AsyncMME` separately) so a
+        single tool instance works in both sync and async agents. Switch to a
+        dedicated :class:`AsyncMME` later if event-loop blocking becomes a
+        real concern under load.
+        """
+        return await asyncio.to_thread(self._run, content)
 
 
 class MMEInjectTool(BaseTool):  # type: ignore[misc, unused-ignore]
@@ -97,14 +124,15 @@ class MMEInjectTool(BaseTool):  # type: ignore[misc, unused-ignore]
         self.mme = mme
 
     def _run(self, query: str) -> str:
-        """TODO Day 2: call self.mme.inject(query) and format items."""
-        del query
-        raise NotImplementedError("TODO Day 2: wire to MME.inject")
+        """Inject memories for ``query`` and return a plain-text formatted pack."""
+        if self.mme is None:
+            raise RuntimeError("MMEInjectTool requires an MME client (mme=...)")
+        pack = self.mme.inject(query)
+        return _format_pack(pack)
 
     async def _arun(self, query: str) -> str:
-        """TODO Day 2: async variant."""
-        del query
-        raise NotImplementedError("TODO Day 2: wire to AsyncMME.inject")
+        """Async variant — runs the sync client in a worker thread."""
+        return await asyncio.to_thread(self._run, query)
 
 
 __all__ = ["MMEInjectTool", "MMESaveTool"]

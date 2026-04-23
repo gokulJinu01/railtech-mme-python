@@ -12,25 +12,41 @@ Example::
             print(pack.items[0].excerpt)
 
     asyncio.run(main())
+
+The structure of this module is intentionally a 1:1 port of
+:mod:`railtech_mme.client`. If you change one, change the other — the test
+matrix expects identical semantics on both clients.
 """
 
 from __future__ import annotations
 
+import json
 from types import TracebackType
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import httpx
 
 from railtech_mme.auth import TokenCache
-from railtech_mme.client import DEFAULT_BASE_URL, DEFAULT_TIMEOUT, _resolve_api_key
-from railtech_mme.exceptions import MMEError
+from railtech_mme.client import (
+    DEFAULT_BASE_URL,
+    DEFAULT_TIMEOUT,
+    _extract_error_message,
+    _parse_retry_after,
+    _resolve_api_key,
+    _safe_json,
+)
+from railtech_mme.exceptions import (
+    MMEAuthError,
+    MMEClientError,
+    MMEError,
+    MMERateLimitError,
+    MMEServerError,
+    MMETimeoutError,
+)
 from railtech_mme.models import (
-    FeedbackRequest,
     InjectFilters,
-    InjectRequest,
     Pack,
     PackItem,
-    SaveRequest,
     SaveResult,
 )
 
@@ -61,6 +77,10 @@ class AsyncMME:
 
         self._tokens = TokenCache(api_key=resolved_key)
 
+        # Populated by the first successful /auth/exchange — see _ensure_jwt.
+        self._user_id: Optional[str] = None
+        self._org_id: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Async context manager
     # ------------------------------------------------------------------
@@ -77,7 +97,7 @@ class AsyncMME:
         await self.aclose()
 
     async def aclose(self) -> None:
-        """Close the underlying async HTTP pool."""
+        """Close the underlying async HTTP pool. Safe to call multiple times."""
         if self._owned_http_client:
             await self._http.aclose()
 
@@ -95,8 +115,17 @@ class AsyncMME:
         source: Optional[str] = None,
     ) -> SaveResult:
         """Persist a memory block. See :meth:`MME.save`."""
-        del content, tags, section, status, source
-        raise NotImplementedError("TODO Day 2: async POST /memory/save")
+        body: dict[str, Any] = {"content": content}
+        if tags is not None:
+            body["tags"] = tags
+        if section is not None:
+            body["section"] = section
+        if status is not None:
+            body["status"] = status
+        if source is not None:
+            body["source"] = source
+        response = await self._request("POST", "/memory/save", json_body=body)
+        return SaveResult(**response)
 
     async def inject(
         self,
@@ -109,8 +138,19 @@ class AsyncMME:
         debug: bool = False,
     ) -> Pack:
         """Retrieve a memory pack. See :meth:`MME.inject`."""
-        del prompt, token_budget, limit, filters, project_id, debug
-        raise NotImplementedError("TODO Day 2: async POST /memory/inject")
+        scope = await self._tenant_scope(project_override=project_id)
+        body: dict[str, Any] = {
+            "prompt": prompt,
+            "tokenBudget": token_budget,
+            "debug": debug,
+            **scope,
+        }
+        if limit is not None:
+            body["limit"] = limit
+        if filters is not None:
+            body["filters"] = filters.model_dump(by_alias=True, exclude_none=True)
+        response = await self._request("POST", "/memory/inject", json_body=body)
+        return Pack(**response)
 
     async def feedback(
         self,
@@ -122,8 +162,15 @@ class AsyncMME:
         project_id: Optional[str] = None,
     ) -> None:
         """Record pack feedback. See :meth:`MME.feedback`."""
-        del pack_id, accepted, item_ids, tags, project_id
-        raise NotImplementedError("TODO Day 2: async POST /memory/feedback")
+        scope = await self._tenant_scope(project_override=project_id)
+        body: dict[str, Any] = {
+            "packId": pack_id,
+            "accepted": accepted,
+            "itemIds": item_ids or [],
+            "tags": tags or [],
+            **scope,
+        }
+        await self._request("POST", "/memory/feedback", json_body=body)
 
     async def recent(
         self,
@@ -131,22 +178,44 @@ class AsyncMME:
         limit: int = 20,
         section: Optional[str] = None,
     ) -> list[PackItem]:
-        """Return recent memory blocks."""
-        del limit, section
-        raise NotImplementedError("TODO Day 2: async GET /memory/recent")
+        """Return recent memory blocks. See :meth:`MME.recent`."""
+        params: dict[str, Any] = {"limit": limit}
+        if section is not None:
+            params["section"] = section
+        response = await self._request("GET", "/memory/recent", params=params)
+        raw_items = response.get("results") or []
+        return [PackItem(**item) for item in raw_items]
 
     async def delete(self, memory_id: str) -> None:
-        """Delete a memory block."""
-        del memory_id
-        raise NotImplementedError("TODO Day 2: async DELETE /memory/:id")
+        """Delete a memory block. See :meth:`MME.delete`."""
+        await self._request("DELETE", f"/memory/{memory_id}")
 
     async def tags(self) -> list[str]:
-        """Return all tags for the authenticated org."""
-        raise NotImplementedError("TODO Day 2: async GET /tags/all")
+        """Return all tags. See :meth:`MME.tags`."""
+        response = await self._request("GET", "/tags/all")
+        raw_tags = response.get("tags") or []
+        return [str(t) for t in raw_tags]
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internal helpers — async versions of the sync helpers
     # ------------------------------------------------------------------
+
+    async def _tenant_scope(
+        self, *, project_override: Optional[str] = None
+    ) -> dict[str, str]:
+        """Return ``{orgId, projectId?}`` for endpoints that need it in the body."""
+        await self._ensure_jwt()
+        if not self._org_id:
+            raise MMEAuthError(
+                "Server did not return org_id during /auth/exchange; "
+                "cannot scope request to a tenant.",
+                status_code=500,
+            )
+        scope: dict[str, str] = {"orgId": self._org_id}
+        project = project_override or self._project_id
+        if project:
+            scope["projectId"] = project
+        return scope
 
     async def _request(
         self,
@@ -155,13 +224,162 @@ class AsyncMME:
         *,
         json_body: Optional[dict[str, Any]] = None,
         params: Optional[dict[str, Any]] = None,
+        _retry_on_401: bool = True,
     ) -> dict[str, Any]:
-        """Async version of :meth:`MME._request`. Same contract."""
-        del method, path, json_body, params
-        raise NotImplementedError("TODO Day 2: async HTTP dispatcher")
+        """Async version of :meth:`MME._request`. Same contract, same error taxonomy."""
+        jwt = await self._ensure_jwt()
+        headers = {
+            "Authorization": f"Bearer {jwt}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = await self._http.request(
+                method,
+                path,
+                json=json_body,
+                params=params,
+                headers=headers,
+            )
+        except httpx.TimeoutException as e:
+            raise MMETimeoutError(f"{method} {path} timed out after {self._timeout}s") from e
+        except httpx.HTTPError as e:
+            raise MMEError(f"Network error on {method} {path}: {e}") from e
+
+        # --- Success path ---------------------------------------------------
+        if response.is_success:
+            if response.status_code == 204 or not response.content:
+                return {}
+            try:
+                parsed: Any = response.json()
+            except (ValueError, json.JSONDecodeError) as e:
+                raise MMEServerError(
+                    f"Server returned non-JSON on {response.status_code}: {e}",
+                    status_code=response.status_code,
+                ) from e
+            if not isinstance(parsed, dict):
+                raise MMEServerError(
+                    f"Expected JSON object from {method} {path}, "
+                    f"got {type(parsed).__name__}",
+                    status_code=response.status_code,
+                    response_body={"data": parsed},
+                )
+            return cast("dict[str, Any]", parsed)
+
+        # --- Error path -----------------------------------------------------
+        body = _safe_json(response)
+        message = _extract_error_message(body, response.status_code)
+
+        if response.status_code == 401:
+            self._tokens.invalidate()
+            if _retry_on_401:
+                return await self._request(
+                    method,
+                    path,
+                    json_body=json_body,
+                    params=params,
+                    _retry_on_401=False,
+                )
+            raise MMEAuthError(message, status_code=401, response_body=body)
+
+        if response.status_code == 403:
+            raise MMEAuthError(message, status_code=403, response_body=body)
+
+        if response.status_code == 429:
+            raise MMERateLimitError(
+                message,
+                retry_after=_parse_retry_after(response),
+                status_code=429,
+                response_body=body,
+            )
+
+        if 400 <= response.status_code < 500:
+            raise MMEClientError(
+                message,
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        if response.status_code >= 500:
+            raise MMEServerError(
+                message,
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        raise MMEError(
+            f"Unexpected status {response.status_code}: {message}",
+            status_code=response.status_code,
+            response_body=body,
+        )
 
     async def _ensure_jwt(self) -> str:
-        """Async version of :meth:`MME._ensure_jwt`."""
-        raise NotImplementedError("TODO Day 2: async JWT exchange")
+        """Async version of :meth:`MME._ensure_jwt`. Same caching, same side effects."""
+        cached = self._tokens.jwt
+        if cached is not None:
+            return cached
 
-    _unused_refs = (FeedbackRequest, InjectRequest, SaveRequest, MMEError)
+        try:
+            response = await self._http.post(
+                "/auth/exchange",
+                json={"apiKey": self._api_key},
+                headers={"Content-Type": "application/json"},
+            )
+        except httpx.TimeoutException as e:
+            raise MMETimeoutError(
+                f"/auth/exchange timed out after {self._timeout}s"
+            ) from e
+        except httpx.HTTPError as e:
+            raise MMEError(f"Network error on /auth/exchange: {e}") from e
+
+        if response.status_code == 401:
+            body = _safe_json(response)
+            raise MMEAuthError(
+                _extract_error_message(body, 401)
+                or "Invalid or inactive API key. "
+                "Get a new one at https://mme.railtech.io.",
+                status_code=401,
+                response_body=body,
+            )
+        if response.status_code == 429:
+            body = _safe_json(response)
+            raise MMERateLimitError(
+                _extract_error_message(body, 429) or "Too many exchange attempts",
+                retry_after=_parse_retry_after(response),
+                status_code=429,
+                response_body=body,
+            )
+        if not response.is_success:
+            body = _safe_json(response)
+            raise MMEServerError(
+                _extract_error_message(body, response.status_code)
+                or f"Auth exchange failed: {response.status_code}",
+                status_code=response.status_code,
+                response_body=body,
+            )
+
+        try:
+            data = cast("dict[str, Any]", response.json())
+        except (ValueError, json.JSONDecodeError) as e:
+            raise MMEServerError(
+                f"/auth/exchange returned non-JSON: {e}",
+                status_code=response.status_code,
+            ) from e
+
+        jwt = data.get("token")
+        if not isinstance(jwt, str) or not jwt:
+            raise MMEServerError(
+                "/auth/exchange succeeded but returned no 'token' field",
+                status_code=response.status_code,
+                response_body=data,
+            )
+
+        self._tokens.set(jwt)
+        user_id = data.get("user_id")
+        org_id = data.get("org_id")
+        if isinstance(user_id, str):
+            self._user_id = user_id
+        if isinstance(org_id, str):
+            self._org_id = org_id
+
+        return jwt

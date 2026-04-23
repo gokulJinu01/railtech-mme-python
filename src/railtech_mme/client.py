@@ -13,17 +13,13 @@ Example::
         pack = mme.inject("What do I like?")
         print(pack.items[0].excerpt)
 
-Day-1 scaffold note
--------------------
+Note
+----
 
-All network bodies below raise :class:`NotImplementedError`. The method
-signatures, docstrings, and return types are final. Fill in each body with
-an ``httpx.Client`` call, map the response to the declared Pydantic model,
-and map server errors to the appropriate exception class from
-:mod:`railtech_mme.exceptions`.
-
-See the identical async implementation in :mod:`railtech_mme.aclient` for
-structural symmetry; do not let the two clients drift.
+The async client in :mod:`railtech_mme.aclient` is a 1:1 mirror of this
+module — same method names, signatures, error taxonomy, and response shapes.
+If you change one, change the other; the test matrix expects identical
+semantics across both.
 """
 
 from __future__ import annotations
