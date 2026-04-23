@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "railtech-mme"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Official Python SDK for MME (Modular Memory Engine) — tag-graph memory for LLMs, built by Rail Tech."
 readme = "README.md"
 license = { text = "Apache-2.0" }
