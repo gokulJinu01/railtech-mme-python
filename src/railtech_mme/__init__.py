@@ -29,6 +29,7 @@ from railtech_mme.exceptions import (
 )
 from railtech_mme.models import (
     Bounds,
+    InjectFilters,
     Pack,
     PackItem,
     Rationale,
@@ -45,6 +46,7 @@ __all__ = [
     "AsyncMME",
     # Models
     "Bounds",
+    "InjectFilters",
     "MMEAuthError",
     "MMEBudgetExceeded",
     "MMEClientError",

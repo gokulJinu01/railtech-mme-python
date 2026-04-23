@@ -25,7 +25,8 @@ def main() -> None:
 
         for item in pack.items:
             print(f"  - {item.title}")
-            print(f"    score: {item.score.total:.3f}" if item.score else "")
+            if item.score is not None:
+                print(f"    score: {item.score.total:.3f}")
             print(f"    {item.excerpt}")
 
         # 3. Tell MME the pack was useful — improves retrieval over time
